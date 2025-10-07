@@ -4,3 +4,4 @@ apscheduler
 canvasapi
 pytz
 typing_extensions
+audioop-lts
