@@ -11,7 +11,26 @@ from canvasapi import Canvas
 from datetime import datetime, timedelta
 import pytz
 
-# --- Load .env ---
+# ✅ KEEP-ALIVE WEB SERVER (to prevent Render sleep)
+from flask import Flask
+from threading import Thread
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "I'm alive"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+keep_alive()
+
+# --- Load .env explicitly ---
 env_path = pathlib.Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
@@ -21,78 +40,75 @@ CANVAS_BASE_URL = os.getenv("CANVAS_BASE_URL")
 CANVAS_API_TOKEN = os.getenv("CANVAS_API_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "America/New_York")
 
-# --- Verify environment ---
+# Debug print
+print("DEBUG - DISCORD_CHANNEL_ID:", DISCORD_CHANNEL_ID)
+print("DEBUG - CANVAS_BASE_URL:", CANVAS_BASE_URL)
+
+# Validate env values
 missing = []
-for key, val in {
-    "DISCORD_TOKEN": DISCORD_TOKEN,
-    "DISCORD_CHANNEL_ID": DISCORD_CHANNEL_ID,
-    "CANVAS_BASE_URL": CANVAS_BASE_URL,
-    "CANVAS_API_TOKEN": CANVAS_API_TOKEN
-}.items():
-    if not val:
-        missing.append(key)
+if not DISCORD_TOKEN:
+    missing.append("DISCORD_TOKEN")
+if not DISCORD_CHANNEL_ID:
+    missing.append("DISCORD_CHANNEL_ID")
+if not CANVAS_BASE_URL:
+    missing.append("CANVAS_BASE_URL")
+if not CANVAS_API_TOKEN:
+    missing.append("CANVAS_API_TOKEN")
+
 if missing:
     raise SystemExit(f"❌ Missing environment variables: {', '.join(missing)}")
 
+# Convert channel ID to int
 DISCORD_CHANNEL_ID = int(DISCORD_CHANNEL_ID)
 
-# --- Setup Canvas + timezone ---
+# --- Setup timezone + Canvas API ---
 tz = pytz.timezone(TIMEZONE)
 canvas = Canvas(CANVAS_BASE_URL, CANVAS_API_TOKEN)
 
 # --- Setup Discord bot ---
 intents = discord.Intents.default()
-intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 scheduler = AsyncIOScheduler(timezone=tz)
 
-# --- Helper: fetch assignments ---
+# --- Helpers ---
 def get_upcoming_assignments(days_ahead=7):
     now = datetime.now(tz)
     horizon = now + timedelta(days=days_ahead)
     assignments = []
-    print("📘 Fetching assignments...")
-    try:
-        for course in canvas.get_courses(enrollment_state="active"):
+    for course in canvas.get_courses(enrollment_state="active"):
+        try:
             for a in course.get_assignments():
                 if not a.due_at:
                     continue
                 due = datetime.fromisoformat(a.due_at.replace("Z", "+00:00")).astimezone(tz)
                 if now <= due <= horizon:
                     assignments.append((course.name, a.name, due, a.html_url))
-        print(f"✅ Found {len(assignments)} assignments.")
-    except Exception as e:
-        print(f"⚠️ Error fetching assignments: {e}")
+        except Exception:
+            continue
     return sorted(assignments, key=lambda x: x[2])
 
-# --- Helper: send message to Discord ---
 async def send_message(text):
     channel = bot.get_channel(DISCORD_CHANNEL_ID)
     if channel:
         await channel.send(text)
     else:
-        print("❌ Could not find channel:", DISCORD_CHANNEL_ID)
+        print("❌ Could not find channel ID:", DISCORD_CHANNEL_ID)
 
-# --- Formatting ---
 def format_assignment(course, name, due, url):
     return f"📌 **{name}** ({course}) — due {due.strftime('%b %d %I:%M %p')} \n{url}"
 
-# --- Scheduled digests ---
+# --- Scheduled Jobs ---
 async def morning_digest():
     assignments = get_upcoming_assignments()
     if assignments:
         msg = "☀️ **Morning Digest**\n" + "\n".join(format_assignment(*a) for a in assignments)
         await send_message(msg)
-    else:
-        print("No assignments for morning digest.")
 
 async def midday_digest():
     assignments = get_upcoming_assignments()
     if assignments:
         msg = "🕐 **Midday Digest**\n" + "\n".join(format_assignment(*a) for a in assignments)
         await send_message(msg)
-    else:
-        print("No assignments for midday digest.")
 
 async def schedule_two_hour_warnings():
     assignments = get_upcoming_assignments()
@@ -107,30 +123,35 @@ async def schedule_two_hour_warnings():
 # --- Events ---
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-    print("Bot is online. Waiting for schedules...")
-    await send_message("✅ Canvas Alert Bot is online (first boot).")
+    if not hasattr(bot, 'booted'):
+        print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+        channel = bot.get_channel(DISCORD_CHANNEL_ID)
+        if channel:
+            await channel.send("✅ Canvas Alert Bot is online (first boot).")
+        bot.booted = True
+    else:
+        print("♻️ Bot reconnected (no announcement).")
 
-    # Run only once per real schedule (no spam)
-    scheduler.add_job(lambda: asyncio.create_task(morning_digest()), CronTrigger(hour=8, minute=0))
-    scheduler.add_job(lambda: asyncio.create_task(midday_digest()), CronTrigger(hour=13, minute=0))
-    scheduler.add_job(lambda: asyncio.create_task(schedule_two_hour_warnings()), CronTrigger(hour="*", minute=0))
-    scheduler.start()
+    if not scheduler.running:
+        scheduler.add_job(lambda: asyncio.create_task(morning_digest()), CronTrigger(hour=8, minute=0))
+        scheduler.add_job(lambda: asyncio.create_task(midday_digest()), CronTrigger(hour=13, minute=0))
+        scheduler.add_job(lambda: asyncio.create_task(schedule_two_hour_warnings()), CronTrigger(minute="*/30"))
+        scheduler.start()
 
-# --- Commands ---
 @bot.command()
 async def ping(ctx):
-    await ctx.send("pong 🏓")
+    await ctx.send("pong 🚨")
 
 @bot.command()
 async def next(ctx):
+    """Shows upcoming Canvas assignments."""
+    await ctx.send("📘 Checking Canvas for upcoming assignments...")
     assignments = get_upcoming_assignments()
     if not assignments:
         await ctx.send("🎉 No upcoming assignments found.")
     else:
-        msg = "📖 **Next Assignments**\n" + "\n".join(format_assignment(*a) for a in assignments[:5])
+        msg = "**Upcoming Assignments:**\n" + "\n".join(format_assignment(*a) for a in assignments[:5])
         await ctx.send(msg)
 
-# --- Run bot ---
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
