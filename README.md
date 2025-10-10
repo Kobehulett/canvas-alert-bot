@@ -1,9 +1,10 @@
 # Canvas Alert Bot
 
 ## What the Bot Does
-This bot connects to Canvas LMS and automatically checks for upcoming assignments.  
-It sends reminders and updates to a Discord channel because i keep forgetting due dates.  
-You can also use commands like `!ping` to check if it’s online and `!next` to see upcoming assignments.
+this Discord bot conencts to canvas and autonomously checks for upcoming assignments 
+it sends reminders and updates to a discord channel because Im often on discord and I often forget due dates 
+I also used commands like "!ping" tp verify if the bot is online if it is it will respond with "pong".
+you can also use commands like '!next' to see upcoming assignments.
 
 ## How to Run It
 1. Add your Canvas and Discord credentials to a `.env` file:
